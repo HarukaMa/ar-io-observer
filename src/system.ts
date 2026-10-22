@@ -759,10 +759,8 @@ if (!config.SUBMIT_CONTRACT_INTERACTIONS) {
   });
 }
 
-// If no external-submission sinks are configured at all (Turbo
-// missing AND SUBMIT_CONTRACT_INTERACTIONS=false), skip wiring the
-// pipeline + gate entirely. The observer will run as a pure
-// persistence loop — useful for dev / dry-run / sniffing.
+// Without submission sinks, omit the submission pipeline and its gate.
+// Assessment participation still requires finalized epoch prescriptions.
 export const submissionReportSink =
   submissionStores.length > 0
     ? new PipelineReportSink({
@@ -825,6 +823,8 @@ export function createContinuousObserver(): ContinuousObserver {
     persistenceSink: persistenceReportSink,
     submissionSink: submissionReportSink,
     submissionGate,
+    observationGate: (epochIndex) =>
+      epochSource.getObserverPrescription(epochIndex, solanaObserverAddress),
     nodeReleaseVersion: config.AR_IO_NODE_RELEASE,
     nameAssessmentConcurrency: config.NAME_ASSESSMENT_CONCURRENCY,
     offsetObservation: {

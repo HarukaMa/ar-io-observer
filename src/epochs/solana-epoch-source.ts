@@ -30,7 +30,12 @@ import {
 } from '@solana/kit';
 import type winston from 'winston';
 
-import { deserializeEpochSettingsFull, getEpochSettingsPDA } from '@ar.io/sdk';
+import {
+  deserializeEpoch,
+  deserializeEpochSettingsFull,
+  getEpochPDA,
+  getEpochSettingsPDA,
+} from '@ar.io/sdk';
 import type {
   EpochSettings,
   EpochTimestampParams,
@@ -136,6 +141,29 @@ export class SolanaEpochSource implements EpochTimestampSource {
       epochEndTimestamp: params.epochEndTimestamp,
     });
     return params;
+  }
+
+  async getObserverPrescription(
+    epochIndex: number,
+    observerAddress: string,
+  ): Promise<boolean | undefined> {
+    const [pda] = await getEpochPDA(epochIndex, this.garProgramAddress);
+    const account = await fetchEncodedAccount(this.rpc, pda, {
+      commitment: 'finalized',
+    });
+    if (!account.exists) return undefined;
+    if (account.programAddress !== this.garProgramAddress) {
+      throw new Error('Epoch account owner mismatch');
+    }
+    const epoch = deserializeEpoch(Buffer.from(account.data));
+    if (epoch.epochIndex !== epochIndex) {
+      throw new Error('Epoch account index mismatch');
+    }
+    if (epoch.prescriptionsDone === 0) return undefined;
+    for (let index = 0; index < epoch.observerCount; index++) {
+      if (epoch.prescribedObservers[index] === observerAddress) return true;
+    }
+    return false;
   }
 
   async getEpochStartTimestamp(): Promise<number> {

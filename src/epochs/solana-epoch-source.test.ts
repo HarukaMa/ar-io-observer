@@ -7,6 +7,14 @@
 import { expect } from 'chai';
 import * as sinon from 'sinon';
 import * as winston from 'winston';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import { createSolanaRpc } from '@solana/kit';
+import {
+  getEpochDecoder,
+  getEpochEncoder,
+  getEpochSize,
+} from '@ar.io/solana-contracts/gar';
 
 import { SolanaEpochSource } from './solana-epoch-source.js';
 
@@ -164,6 +172,99 @@ describe('SolanaEpochSource', () => {
         expect(e.message).to.match(/not found/);
       }
       expect(threw).to.equal(true);
+    });
+  });
+
+  describe('finalized prescriptions', () => {
+    const program = 'AF8QAEaR4hzsqeUDwEdeTXMYtdyFegTENBdnJro6WVLR';
+    const observer = '2yCUx5edFvUrkibYaUa2ZXWyx9kuJkS8CwyzsgHPWdZZ';
+    const epoch = getEpochDecoder().decode(new Uint8Array(getEpochSize()));
+    let missing = true;
+    let owner = program;
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const payload: unknown = JSON.parse(Buffer.concat(chunks).toString());
+      if (
+        typeof payload !== 'object' ||
+        payload === null ||
+        !('id' in payload)
+      ) {
+        throw new Error('Invalid RPC request');
+      }
+      response.setHeader('content-type', 'application/json');
+      response.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: payload.id,
+          result: {
+            context: { slot: 1 },
+            value: missing
+              ? null
+              : {
+                  data: [
+                    Buffer.from(getEpochEncoder().encode(epoch)).toString(
+                      'base64',
+                    ),
+                    'base64',
+                  ],
+                  executable: false,
+                  lamports: 1,
+                  owner,
+                  rentEpoch: 0,
+                  space: getEpochSize(),
+                },
+          },
+        }),
+      );
+    });
+    let source: SolanaEpochSource;
+    before(async () => {
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const address = server.address();
+      if (address === null || typeof address === 'string')
+        throw new Error('Missing RPC listener');
+      source = new SolanaEpochSource({
+        rpc: createSolanaRpc(`http://127.0.0.1:${address.port}`),
+        garProgramAddress: program,
+        log: winston.createLogger({ silent: true }),
+      });
+    });
+    after(async () => {
+      const closed = once(server, 'close');
+      server.close();
+      await closed;
+    });
+    it('waits for prescription completion and uses only counted observer identities', async () => {
+      epoch.epochIndex = 7n;
+      epoch.prescribedObservers[0] = observer;
+      epoch.observerCount = 1;
+      expect(await source.getObserverPrescription(7, observer)).to.equal(
+        undefined,
+      );
+      missing = false;
+      expect(await source.getObserverPrescription(7, observer)).to.equal(
+        undefined,
+      );
+      epoch.prescriptionsDone = 1;
+      expect(await source.getObserverPrescription(7, observer)).to.equal(true);
+      epoch.observerCount = 0;
+      expect(await source.getObserverPrescription(7, observer)).to.equal(false);
+      epoch.observerCount = 1;
+      epoch.prescribedObservers[0] = program;
+      epoch.prescribedObserverGateways[0] = observer;
+      expect(await source.getObserverPrescription(7, observer)).to.equal(false);
+      owner = observer;
+      let error: unknown;
+      try {
+        await source.getObserverPrescription(7, observer);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error)
+        .to.be.instanceOf(Error)
+        .with.property('message', 'Epoch account owner mismatch');
     });
   });
 

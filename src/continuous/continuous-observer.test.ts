@@ -1582,4 +1582,117 @@ describe('ContinuousObserver Integration', function () {
       );
     });
   });
+  describe('Prescription participation', function () {
+    function setup() {
+      const epochIndex = sinon.stub().resolves(1);
+      const observationGate = sinon.stub().resolves(undefined);
+      const hosts = sinon.stub().resolves(gateways);
+      const names = sinon.stub().resolves(['prescribed']);
+      const entropy = sinon.stub().resolves(Buffer.from('participation'));
+      const stateStore = {
+        load: sinon.stub().resolves(null),
+        save: sinon.stub().resolves(),
+        clear: sinon.stub().resolves(),
+      };
+      const report = sinon.stub().resolves();
+      const observer = new ContinuousObserver({
+        observerAddress: 'observer-wallet',
+        referenceGateway: {
+          getArnsResolution: sinon
+            .stub()
+            .rejects(new Error('unexpected assessment')),
+          checkChunkAvailability: sinon
+            .stub()
+            .rejects(new Error('unexpected offset')),
+          getChunkMetadata: sinon
+            .stub()
+            .rejects(new Error('unexpected offset')),
+        },
+        epochSource: {
+          getEpochIndex: epochIndex,
+          getEpochStartTimestamp: async () => Date.now(),
+          getEpochEndTimestamp: async () => Date.now() + 86_400_000,
+          getEpochStartHeight: async () => 0,
+          getEpochSettings: async () => ({
+            epochZeroStartTimestamp: 0,
+            durationMs: 86_400_000,
+          }),
+        },
+        hostsSource: { getHosts: hosts },
+        prescribedNamesSource: { getNames: names },
+        chosenNamesSource: { getNames: names },
+        entropySource: { getEntropy: entropy },
+        stateStore,
+        persistenceSink: { saveReport: report },
+        ...{ observationGate },
+        nodeReleaseVersion: 'test',
+        nameAssessmentConcurrency: 1,
+        log: testLog,
+      });
+      return {
+        observer,
+        epochIndex,
+        observationGate,
+        hosts,
+        names,
+        entropy,
+        stateStore,
+        report,
+      };
+    }
+
+    it('waits for prescriptions and retries errors without scanning or changing saved state', async function () {
+      const f = setup();
+      await f.observer['initializeOrRestore']();
+      expect(f.hosts.called).to.equal(false);
+      expect(f.entropy.called).to.equal(false);
+      expect(f.stateStore.load.called).to.equal(false);
+
+      f.observationGate.rejects(new Error('RPC unavailable'));
+      let error: unknown;
+      try {
+        await f.observer['runObservationCycle']();
+      } catch (caught) {
+        error = caught;
+      }
+      expect((error as Error).message).to.equal('RPC unavailable');
+      f.observationGate.resolves(false);
+      await f.observer['runObservationCycle']();
+      await f.observer['runObservationCycle']();
+      expect(f.observationGate.callCount).to.equal(3);
+      expect(f.stateStore.clear.called).to.equal(false);
+      expect(f.stateStore.save.called).to.equal(false);
+      expect(f.hosts.called).to.equal(false);
+      expect(f.names.called).to.equal(false);
+      expect(f.entropy.called).to.equal(false);
+      expect(f.report.called).to.equal(false);
+    });
+
+    it('resumes when prescribed in a new epoch and stops again on an unselected epoch', async function () {
+      const f = setup();
+      f.observationGate.resolves(false);
+      await f.observer['initializeOrRestore']();
+      await f.observer['runObservationCycle']();
+      expect(f.hosts.called).to.equal(false);
+      f.epochIndex.resolves(2);
+      f.observationGate.resolves(true);
+      await f.observer['runObservationCycle']();
+      await f.observer['runObservationCycle']();
+      expect(f.hosts.callCount).to.equal(1);
+      expect(f.names.called).to.equal(true);
+      const nameCalls = f.names.callCount;
+      const entropyCalls = f.entropy.callCount;
+      f.epochIndex.resolves(3);
+      f.observationGate.resolves(false);
+      await f.observer['runObservationCycle']();
+      await f.observer['runObservationCycle']();
+      expect(f.observationGate.args.map(([index]) => index)).to.deep.equal([
+        1, 2, 3,
+      ]);
+      expect(f.hosts.callCount).to.equal(1);
+      expect(f.names.callCount).to.equal(nameCalls);
+      expect(f.entropy.callCount).to.equal(entropyCalls);
+      expect(f.report.called).to.equal(false);
+    });
+  });
 });
