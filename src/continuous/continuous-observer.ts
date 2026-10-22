@@ -117,15 +117,14 @@ export class ContinuousObserver {
   private readonly chosenNamesSource: ArnsNamesSource;
   private readonly entropySource: EntropySource;
   private readonly stateStore: ObservationStateStore;
-  // Pipeline split: persistence ALWAYS runs (local record, restart-restore);
-  // submission runs only when `submissionGate` allows it (e.g. observer
-  // is VRF-prescribed for this epoch + hasn't already submitted). On a
-  // dev setup with no Solana wiring, both `submissionSink` and
-  // `submissionGate` can be undefined — the observer behaves like a
-  // pure persistence loop.
+  // Assessment participation and report submission have separate gates.
   private readonly persistenceSink: ReportSink;
   private readonly submissionSink: ReportSink | undefined;
   private readonly submissionGate: SubmissionGate | undefined;
+  private readonly observationGate:
+    | ((epochIndex: number) => Promise<boolean | undefined>)
+    | undefined;
+  private prescription?: { epochIndex: number; prescribed: boolean };
   private readonly config: ContinuousObserverConfig;
   private readonly log: Logger;
 
@@ -167,6 +166,7 @@ export class ContinuousObserver {
     persistenceSink,
     submissionSink,
     submissionGate,
+    observationGate,
     nodeReleaseVersion,
     nameAssessmentConcurrency,
     offsetObservation,
@@ -181,7 +181,7 @@ export class ContinuousObserver {
     chosenNamesSource: ArnsNamesSource;
     entropySource: EntropySource;
     stateStore: ObservationStateStore;
-    /** Local-only sinks (FsReportStore, LogReportSink). Always run. */
+    /** Local report sinks (FsReportStore, LogReportSink). */
     persistenceSink: ReportSink;
     /** External-submission sinks (Turbo upload + Solana on-chain).
      *  Runs only when `submissionGate` returns `proceed: true`, or
@@ -192,6 +192,8 @@ export class ContinuousObserver {
      *  run this cycle (typically: am I prescribed? have I already
      *  submitted?). Omit to always submit (legacy / AO behavior). */
     submissionGate?: SubmissionGate;
+    /** Return undefined while prescriptions are pending. Omit for local assessment runs. */
+    observationGate?: (epochIndex: number) => Promise<boolean | undefined>;
     nodeReleaseVersion: string;
     nameAssessmentConcurrency: number;
     /** Offset (chunk-proof) checks. Omit to disable them. */
@@ -209,6 +211,7 @@ export class ContinuousObserver {
     this.persistenceSink = persistenceSink;
     this.submissionSink = submissionSink;
     this.submissionGate = submissionGate;
+    this.observationGate = observationGate;
     this.offsetObservation = offsetObservation;
     this.log = log.child({ class: 'ContinuousObserver' });
 
@@ -269,8 +272,6 @@ export class ContinuousObserver {
       config: this.config,
     });
 
-    await this.initializeOrRestore();
-
     while (!this.stopped) {
       try {
         await this.runObservationCycle();
@@ -299,6 +300,7 @@ export class ContinuousObserver {
    */
   private async initializeOrRestore(): Promise<void> {
     const currentEpochIndex = await this.epochSource.getEpochIndex();
+    if (!(await this.shouldObserve(currentEpochIndex))) return;
 
     // Try to restore from saved state
     const savedState = await this.stateStore.load();
@@ -619,10 +621,24 @@ export class ContinuousObserver {
     return offsetAssessments;
   }
 
+  private async shouldObserve(epochIndex: number): Promise<boolean> {
+    if (this.observationGate === undefined) return true;
+    if (this.prescription?.epochIndex === epochIndex) {
+      return this.prescription.prescribed;
+    }
+    const prescribed = await this.observationGate(epochIndex);
+    if (prescribed === undefined) return false;
+    this.prescription = { epochIndex, prescribed };
+    this.log.info('Observer prescription resolved', { epochIndex, prescribed });
+    return prescribed;
+  }
+
   /**
    * Run a single observation cycle.
    */
   private async runObservationCycle(): Promise<void> {
+    const currentEpochIndex = await this.epochSource.getEpochIndex();
+    if (!(await this.shouldObserve(currentEpochIndex))) return;
     if (!this.state) {
       await this.initializeOrRestore();
       return;
@@ -631,7 +647,6 @@ export class ContinuousObserver {
     const now = Date.now();
 
     // Check for epoch transition
-    const currentEpochIndex = await this.epochSource.getEpochIndex();
     if (currentEpochIndex !== this.state.epochIndex) {
       this.log.info('New epoch detected', {
         previousEpoch: this.state.epochIndex,

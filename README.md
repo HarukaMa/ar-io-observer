@@ -36,6 +36,11 @@ curl localhost:5050/ar-io/observer/healthcheck
 The current report is accessible at the `/ar-io/observer/reports/current`
 endpoint.
 
+The continuous service waits for finalized epoch prescriptions before loading
+gateways, names, entropy, or running assessments. Unprescribed observers stay idle
+until the next epoch. Epoch watching, cranking, and cleanup keep running
+independently.
+
 ### Docker
 
 Build and run the container:
