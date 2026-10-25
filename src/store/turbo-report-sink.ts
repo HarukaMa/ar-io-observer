@@ -42,6 +42,10 @@ async function createReportDataItem(signer: Signer, report: ObserverReport) {
         value: 'observer',
       },
       {
+        name: 'AR-IO-Observer-Address',
+        value: report.observerAddress,
+      },
+      {
         name: 'AR-IO-Epoch-Start-Height',
         value: report.epochStartHeight.toString(),
       },
@@ -200,6 +204,7 @@ export class TurboReportSink implements ReportSink {
           tags: [
             { name: "App-Name", values: ["AR-IO Observer"] },
             { name: "Content-Type", values: [ "application/json" ] },
+            { name: "AR-IO-Observer-Address", values: [ "${report.observerAddress}" ] },
             { name: "AR-IO-Epoch-Start-Height", values: [ "${epochStartHeight}" ]},
             { name: "AR-IO-Epoch-Index", values: [ "${epochIndex}" ] }
             { name: "AR-IO-Epoch-Start-Timestamp", values: [ "${epochStartTimestamp}" ]},

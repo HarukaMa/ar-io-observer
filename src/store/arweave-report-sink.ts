@@ -29,19 +29,23 @@ export class ArweaveReportSink implements ReportSink {
   // Dependencies
   private log: winston.Logger;
   private arweave: Arweave;
+  private readonly uploadArweave: Arweave;
   private readonly walletJwk: any; // JWK wallet type
 
   constructor({
     log,
     arweave,
+    uploadArweave = arweave,
     walletJwk,
   }: {
     log: winston.Logger;
     arweave: Arweave;
+    uploadArweave?: Arweave;
     walletJwk: any;
   }) {
     this.log = log.child({ class: this.constructor.name });
     this.arweave = arweave;
+    this.uploadArweave = uploadArweave;
     this.walletJwk = walletJwk;
   }
 
@@ -69,7 +73,7 @@ export class ArweaveReportSink implements ReportSink {
       const gzipReportBuffer = await gzip(reportBuffer, { level: 9 });
 
       // Create and configure the transaction
-      const transaction = await this.arweave.createTransaction(
+      const transaction = await this.uploadArweave.createTransaction(
         { data: gzipReportBuffer },
         this.walletJwk,
       );
@@ -80,6 +84,7 @@ export class ArweaveReportSink implements ReportSink {
       transaction.addTag('Content-Type', 'application/json');
       transaction.addTag('Content-Encoding', 'gzip');
       transaction.addTag('AR-IO-Component', 'observer');
+      transaction.addTag('AR-IO-Observer-Address', report.observerAddress);
       transaction.addTag(
         'AR-IO-Epoch-Start-Height',
         report.epochStartHeight.toString(),
@@ -95,10 +100,11 @@ export class ArweaveReportSink implements ReportSink {
       );
 
       // Sign transaction
-      await this.arweave.transactions.sign(transaction, this.walletJwk);
+      await this.uploadArweave.transactions.sign(transaction, this.walletJwk);
 
       // Submit transaction
-      const uploader = await this.arweave.transactions.getUploader(transaction);
+      const uploader =
+        await this.uploadArweave.transactions.getUploader(transaction);
       while (!uploader.isComplete) {
         await uploader.uploadChunk();
         log.debug(`Upload progress: ${uploader.pctComplete}%`);
@@ -132,6 +138,7 @@ export class ArweaveReportSink implements ReportSink {
           tags: [
             { name: "App-Name", values: ["AR-IO Observer"] },
             { name: "Content-Type", values: [ "application/json" ] },
+            { name: "AR-IO-Observer-Address", values: [ "${report.observerAddress}" ] },
             { name: "AR-IO-Epoch-Start-Height", values: [ "${report.epochStartHeight}" ]},
             { name: "AR-IO-Epoch-Index", values: [ "${report.epochIndex}" ] },
             { name: "AR-IO-Epoch-Start-Timestamp", values: [ "${report.epochStartTimestamp}" ]},
