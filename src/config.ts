@@ -54,6 +54,8 @@ export const ARWEAVE_URL = env.varOrDefault(
   'https://turbo-gateway.com',
 );
 
+export const ARWEAVE_UPLOAD_URL = env.varOrUndefined('ARWEAVE_UPLOAD_URL');
+
 export const OBSERVER_WALLET = env.varOrDefault('OBSERVER_WALLET', '<example>');
 
 export const TURBO_UPLOAD_SERVICE_URL = env.varOrUndefined(

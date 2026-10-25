@@ -669,9 +669,17 @@ const turboReportSink =
       })
     : undefined;
 
+const uploadURL = new URL(config.ARWEAVE_UPLOAD_URL ?? config.ARWEAVE_URL);
+const reportUploadArweave = new Arweave({
+  host: uploadURL.hostname,
+  port: Number(uploadURL.port || (uploadURL.protocol === 'https:' ? 443 : 80)),
+  protocol: uploadURL.protocol.replace(':', ''),
+});
+
 const arweaveReportSink = new ArweaveReportSink({
   log,
   arweave,
+  uploadArweave: reportUploadArweave,
   walletJwk,
 });
 
