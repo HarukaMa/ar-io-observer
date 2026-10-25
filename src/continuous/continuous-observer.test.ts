@@ -1582,6 +1582,7 @@ describe('ContinuousObserver Integration', function () {
       );
     });
   });
+
   describe('Prescription participation', function () {
     function setup() {
       const epochIndex = sinon.stub().resolves(1);

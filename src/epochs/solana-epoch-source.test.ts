@@ -236,6 +236,7 @@ describe('SolanaEpochSource', () => {
       server.close();
       await closed;
     });
+
     it('waits for prescription completion and uses only counted observer identities', async () => {
       epoch.epochIndex = 7n;
       epoch.prescribedObservers[0] = observer;
