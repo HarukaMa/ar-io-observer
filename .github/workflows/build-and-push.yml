@@ -5,6 +5,7 @@ on:
     branches:
       - develop
       - main
+      - r86-custom
   # Run lint/test/build on PRs too. Until this was added, the `build` job only
   # ran AFTER a merge to develop/main, so a pull request had no test signal at
   # all — the sole required check was an external reviewer bot. The container
@@ -62,7 +63,6 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: |
-            ghcr.io/ar-io/ar-io-observer:${{ github.sha }}
-            ghcr.io/ar-io/ar-io-observer:latest
+            ghcr.io/harukama/ar-io-observer:${{ github.sha }}
