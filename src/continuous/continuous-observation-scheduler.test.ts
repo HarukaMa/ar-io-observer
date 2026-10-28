@@ -244,8 +244,8 @@ describe('ContinuousObservationScheduler', function () {
     });
   });
 
-  describe('getSubmissionDeadline', function () {
-    it('should place submission deadline after window end by the configured buffer', async function () {
+  describe('getObservationDeadline', function () {
+    it('should place observation deadline after window end by the configured buffer', async function () {
       const scheduler = new ContinuousObservationScheduler({
         entropySource,
         config: {
@@ -262,7 +262,7 @@ describe('ContinuousObservationScheduler', function () {
         epochStartHeight,
       });
 
-      expect(scheduler.getSubmissionDeadline()).to.equal(windowEnd + 1234);
+      expect(scheduler.getObservationDeadline()).to.equal(windowEnd + 1234);
     });
   });
 });

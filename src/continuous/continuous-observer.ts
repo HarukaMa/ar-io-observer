@@ -56,6 +56,12 @@ const DEFAULT_CYCLE_INTERVAL_MS = 30 * 1000; // 30 seconds
 const DEFAULT_GATEWAY_ASSESSMENT_CONCURRENCY = 3;
 const DEFAULT_OBSERVATIONS_PER_GATEWAY = 3;
 const DEFAULT_MAJORITY_THRESHOLD = 2;
+// save_observations is rejected once the epoch ends. Stop retrying this long
+// before then so an in-flight transaction can still land.
+const SUBMISSION_CUTOFF_BEFORE_EPOCH_END_MS = 5 * 60 * 1000;
+// A late window can put the observation deadline at epoch end. Stop waiting
+// on observations early enough to leave this long for submission retries.
+const SUBMISSION_RETRY_BUDGET_MS = 15 * 60 * 1000;
 
 // The offset search space is the weave up to a stable Arweave height,
 // rounded down to this many blocks (~33 hours) so that observers starting
@@ -676,26 +682,11 @@ export class ContinuousObserver {
       return;
     }
 
-    // Close the submission window FIRST, before the name-loading retry
-    // below. If `prescribe_epoch` never lands, `prescribedNamesReady`
-    // stays false and the lazy-load block would `return` every cycle —
-    // never reaching the deadline check, so `submissionDeadlineExceeded`
-    // would never persist and the epoch's state would linger until
-    // rollover. Gating here ensures the window closes regardless.
-    if (
-      !this.state.submissionDeadlineExceeded &&
-      now >= this.scheduler.getSubmissionDeadline()
-    ) {
-      this.state.submissionDeadlineExceeded = true;
-      this.state.pendingObservations = [];
-      this.scheduler.clearSchedule();
-      await this.stateStore.save(this.state);
-      this.log.warn('Submission window closed for epoch', {
-        epochIndex: this.state.epochIndex,
-      });
-    }
-
-    if (this.state.submissionDeadlineExceeded) {
+    // Apply deadlines FIRST, before the name-loading retry below. If
+    // `prescribe_epoch` never lands, `prescribedNamesReady` stays false and
+    // the lazy-load block would `return` every cycle, so the epoch would
+    // never close and its state would linger until rollover.
+    if (await this.applyDeadlines(now)) {
       this.updateCycleMetrics(now);
       return;
     }
@@ -787,20 +778,11 @@ export class ContinuousObserver {
       await this.stateStore.save(this.state);
     }
 
-    // Draining observations above can take long enough to cross the
-    // submission deadline; re-check before finalizing so we don't submit late.
+    // Draining observations above can take long enough to cross a
+    // deadline; re-check before finalizing.
     const finalizeTime = Date.now();
-    if (finalizeTime >= this.scheduler.getSubmissionDeadline()) {
-      if (!this.state.submissionDeadlineExceeded) {
-        this.state.submissionDeadlineExceeded = true;
-        this.state.pendingObservations = [];
-        this.scheduler.clearSchedule();
-        await this.stateStore.save(this.state);
-        this.log.warn('Submission window closed for epoch', {
-          epochIndex: this.state.epochIndex,
-        });
-        this.updateCycleMetrics(finalizeTime);
-      }
+    if (await this.applyDeadlines(finalizeTime)) {
+      this.updateCycleMetrics(finalizeTime);
       return;
     }
 
@@ -816,6 +798,49 @@ export class ContinuousObserver {
         }
       }
     }
+  }
+
+  /**
+   * Past the observation deadline, drop still-pending observations so the
+   * report can be submitted with what was collected. One gateway that keeps
+   * failing to be observed must not block the whole report. Returns true
+   * once the epoch is closed for submission.
+   */
+  private async applyDeadlines(now: number): Promise<boolean> {
+    const state = this.state!;
+    if (
+      !state.submissionDeadlineExceeded &&
+      now >= state.epochEndTimestamp - SUBMISSION_CUTOFF_BEFORE_EPOCH_END_MS
+    ) {
+      state.submissionDeadlineExceeded = true;
+      state.pendingObservations = [];
+      this.scheduler.clearSchedule();
+      await this.stateStore.save(state);
+      this.log.warn('Submission window closed for epoch', {
+        epochIndex: state.epochIndex,
+      });
+    }
+    if (state.submissionDeadlineExceeded) {
+      return true;
+    }
+
+    const dropAt = Math.min(
+      this.scheduler.getObservationDeadline(),
+      state.epochEndTimestamp -
+        SUBMISSION_CUTOFF_BEFORE_EPOCH_END_MS -
+        SUBMISSION_RETRY_BUDGET_MS,
+    );
+    const pendingCount = this.scheduler.getPendingObservationCount();
+    if (pendingCount > 0 && now >= dropAt) {
+      state.pendingObservations = [];
+      this.scheduler.clearSchedule();
+      await this.stateStore.save(state);
+      this.log.warn(
+        'Observation deadline reached; submitting without pending observations',
+        { epochIndex: state.epochIndex, droppedObservations: pendingCount },
+      );
+    }
+    return false;
   }
 
   /**

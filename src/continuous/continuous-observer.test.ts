@@ -686,73 +686,93 @@ describe('ContinuousObserver Integration', function () {
       expect(reportSink.saveReport.calledOnce).to.be.true;
     });
 
-    it('closes the epoch without submitting once the submission deadline is reached', async function () {
-      const stateStore = {
-        load: sinon.stub().resolves(null),
-        save: sinon.stub().resolves(),
-        clear: sinon.stub().resolves(),
-      };
-      const reportSink = {
-        saveReport: sinon
-          .stub()
-          .resolves({ report: {} as any, reportTxId: 'mock-arweave-tx-id' }),
-      };
-      const observer = createObserverForCatchUp({
-        stateStore,
-        reportSink,
-      });
-      const state: ObservationState = {
-        epochIndex: 1,
-        epochStartTimestamp,
-        epochEndTimestamp,
-        epochStartHeight,
-        windowStart: Date.now() - 5_000_000,
-        windowEnd: Date.now() - 5_000_000,
-        pendingObservations: [
-          {
-            id: 'gateway1.example.com:0',
-            fqdn: 'gateway1.example.com',
-            scheduledAt: Date.now() - 5_100_000,
-          },
-        ],
-        gatewayObservations: new Map([
-          [
-            'gateway1.example.com',
+    for (const { title, lateWindow } of [
+      { title: 'once the observation deadline is reached', lateWindow: false },
+      {
+        title: 'before the cutoff when a late window ends at epoch end - 72m',
+        lateWindow: true,
+      },
+    ])
+      it(`submits collected observations ${title}`, async function () {
+        // Latest window: deadline (windowEnd + 72m) equals epoch end, which
+        // the submission cutoff would otherwise beat.
+        const now = Date.now();
+        const epochEnd = lateWindow ? now + 10 * 60_000 : epochEndTimestamp;
+        const windowEnd = lateWindow ? epochEnd - 72 * 60_000 : now - 5_000_000;
+        const stateStore = {
+          load: sinon.stub().resolves(null),
+          save: sinon.stub().resolves(),
+          clear: sinon.stub().resolves(),
+        };
+        const reportSink = {
+          saveReport: sinon
+            .stub()
+            .resolves({ report: {} as any, reportTxId: 'mock-arweave-tx-id' }),
+        };
+        const observer = createObserverForCatchUp({
+          stateStore,
+          reportSink,
+        });
+        const state: ObservationState = {
+          epochIndex: 1,
+          epochStartTimestamp,
+          epochEndTimestamp: epochEnd,
+          epochStartHeight,
+          windowStart: windowEnd - 60_000,
+          windowEnd,
+          pendingObservations: [
             {
+              id: 'gateway1.example.com:0',
               fqdn: 'gateway1.example.com',
-              wallet: 'wallet1',
-              observations: [],
+              scheduledAt: Date.now() - 5_100_000,
             },
           ],
-        ]),
-        gatewayWallets: new Map([['gateway1.example.com', ['wallet1']]]),
-        offsetAssessmentGateways: new Set(),
-        lastCycleTimestamp: Date.now(),
-        reportSubmitted: false,
-        submissionDeadlineExceeded: false,
-      };
-      const assessor = {
-        assessOwnership: sinon.stub().rejects(new Error('persistent failure')),
-        assessGatewayArns: sinon.stub().resolves({
-          prescribedNames: {},
-          chosenNames: {},
-          pass: true,
-        }),
-        clearEpochState: sinon.stub(),
-      };
+          gatewayObservations: new Map([
+            [
+              'gateway1.example.com',
+              {
+                fqdn: 'gateway1.example.com',
+                wallet: 'wallet1',
+                observations: [],
+              },
+            ],
+          ]),
+          gatewayWallets: new Map([['gateway1.example.com', ['wallet1']]]),
+          offsetAssessmentGateways: new Set(),
+          lastCycleTimestamp: Date.now(),
+          reportSubmitted: false,
+          submissionDeadlineExceeded: false,
+        };
+        const assessor = {
+          assessOwnership: sinon
+            .stub()
+            .rejects(new Error('persistent failure')),
+          assessGatewayArns: sinon.stub().resolves({
+            prescribedNames: {},
+            chosenNames: {},
+            pass: true,
+          }),
+          clearEpochState: sinon.stub(),
+        };
 
-      restoreState(observer, state);
-      (observer as any).assessor = assessor;
+        restoreState(observer, state);
+        (observer as any).assessor = assessor;
 
-      await (observer as any).runObservationCycle();
+        await (observer as any).runObservationCycle();
 
-      expect(state.pendingObservations).to.be.empty;
-      expect(state.reportSubmitted).to.be.false;
-      expect(state.submissionDeadlineExceeded).to.be.true;
-      expect(reportSink.saveReport.called).to.be.false;
-    });
+        // The stuck observation is dropped instead of blocking the report,
+        // and the unobserved gateway is reported as failed.
+        expect(assessor.assessOwnership.called).to.be.false;
+        expect(state.pendingObservations).to.be.empty;
+        expect(state.submissionDeadlineExceeded).to.be.false;
+        expect(state.reportSubmitted).to.be.true;
+        expect(reportSink.saveReport.calledOnce).to.be.true;
+        const { report } = reportSink.saveReport.firstCall.args[0];
+        expect(report.gatewayAssessments['gateway1.example.com'].pass).to.be
+          .false;
+      });
 
-    it('does not keep retrying after the submission deadline is reached', async function () {
+    it('closes the epoch without submitting at the submission cutoff', async function () {
       const stateStore = {
         load: sinon.stub().resolves(null),
         save: sinon.stub().resolves(),
@@ -772,7 +792,8 @@ describe('ContinuousObserver Integration', function () {
       const state: ObservationState = {
         epochIndex: 1,
         epochStartTimestamp,
-        epochEndTimestamp,
+        // Inside the cutoff before epoch end.
+        epochEndTimestamp: Date.now() + 60_000,
         epochStartHeight,
         windowStart: Date.now() - 5_000_000,
         windowEnd: Date.now() - 5_000_000,
@@ -824,7 +845,7 @@ describe('ContinuousObserver Integration', function () {
       expect(reportSink.saveReport.called).to.be.false;
     });
 
-    it('does not run restored overdue observations after restart past the submission deadline', async function () {
+    it('drops restored overdue observations and submits after restart past the observation deadline', async function () {
       const deadlinePassedWindowEnd = Date.now() - 5_000_000;
       const state: ObservationState = {
         epochIndex: 1,
@@ -886,10 +907,10 @@ describe('ContinuousObserver Integration', function () {
       await (observer as any).runObservationCycle();
 
       expect(assessor.assessOwnership.called).to.be.false;
-      expect(state.submissionDeadlineExceeded).to.be.true;
+      expect(state.submissionDeadlineExceeded).to.be.false;
       expect(state.pendingObservations).to.be.empty;
-      expect(stateStore.save.calledOnceWithExactly(state)).to.be.true;
-      expect(reportSink.saveReport.called).to.be.false;
+      expect(state.reportSubmitted).to.be.true;
+      expect(reportSink.saveReport.calledOnce).to.be.true;
     });
   });
 
@@ -1546,8 +1567,8 @@ describe('ContinuousObserver Integration', function () {
       expect(assessor.initializeForEpoch.callCount).to.equal(1);
     });
 
-    it('closes the submission window once the deadline passes even if prescribe_epoch never lands', async function () {
-      // Cranker never runs prescribe_epoch → names stay empty forever.
+    it('closes the submission window at the cutoff even if prescribe_epoch never lands', async function () {
+      // Cranker never runs prescribe_epoch -> names stay empty forever.
       const prescribedNamesSource = {
         getNames: sinon.stub().resolves([]),
       };
@@ -1559,12 +1580,11 @@ describe('ContinuousObserver Integration', function () {
         chosenNamesSource,
       });
 
-      // Move the window far into the past so the cycle is firmly past the
-      // submission deadline (windowEnd + submissionBufferMs) regardless of
-      // the configured buffer.
+      // Put the cycle inside the submission cutoff before epoch end.
       const dayMs = 24 * 60 * 60 * 1000;
       (observer as any).state.windowStart = Date.now() - 2 * dayMs;
       (observer as any).state.windowEnd = Date.now() - dayMs;
+      (observer as any).state.epochEndTimestamp = Date.now() + 60_000;
       (observer as any).scheduler.restoreFromState((observer as any).state);
 
       await (observer as any).runObservationCycle();

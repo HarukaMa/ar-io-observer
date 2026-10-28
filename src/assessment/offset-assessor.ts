@@ -1397,11 +1397,12 @@ export class OffsetAssessor {
     let chunkFetched = false;
 
     try {
-      // Fetch chunk data and proof from gateway
-
+      // Fetch chunk data and proof from gateway. A 256 KiB chunk is about
+      // 350 KB as base64url, plus proofs.
       const response = await this.gotClient.get(url, {
         timeout: { request: 7000 },
         responseType: 'json',
+        context: { downloadLimit: 1024 * 1024 },
       });
 
       const chunkResponse = response.body as {

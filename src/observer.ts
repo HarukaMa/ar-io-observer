@@ -27,6 +27,7 @@ import {
   selectGatewaysForOffsetAssessment,
 } from './assessment/offset-assessor.js';
 import * as config from './config.js';
+import { PROBE_TIMEOUT, downloadLimitHandler } from './lib/http-client.js';
 import { customHashPRNG } from './lib/prng.js';
 import log from './log.js';
 import * as metrics from './metrics.js';
@@ -52,13 +53,12 @@ export const REPORT_FORMAT_VERSION = 2;
 
 const NAME_PASS_THRESHOLD = 0.8;
 
+// /ar-io/info is about 1.5 KiB on live gateways.
+const MAX_INFO_RESPONSE_BYTES = 64 * 1024;
+
 const client = got.extend({
-  timeout: {
-    lookup: 5000,
-    connect: 5000,
-    secureConnect: 2000,
-    socket: 7000,
-  },
+  timeout: PROBE_TIMEOUT,
+  handlers: [downloadLimitHandler],
 });
 
 /**
@@ -107,6 +107,7 @@ export async function getArnsResolution({
   entropy: Buffer;
 }): Promise<ArnsResolution> {
   const MAX_BYTES_TO_PROCESS = 1048576; // 1MiB
+  const RANGE_SIZE = 200;
 
   const arnsResolution = (response: Response, dataHashDigest?: string) => ({
     statusCode: response.statusCode,
@@ -179,7 +180,7 @@ export async function getArnsResolution({
       const rng = customHashPRNG(entropy);
       const ranges = generateRandomRanges({
         contentSize: +contentLength,
-        rangeSize: 200,
+        rangeSize: RANGE_SIZE,
         rangeQuantity: 5,
         rng,
       });
@@ -192,6 +193,7 @@ export async function getArnsResolution({
               Range: `bytes=${range}`,
               'Accept-Encoding': 'identity',
             },
+            context: { downloadLimit: RANGE_SIZE },
           }),
         ),
       )
@@ -250,7 +252,9 @@ export async function assessOwnership({
 }): Promise<OwnershipAssessment> {
   try {
     const url = `https://${host}/ar-io/info`;
-    const resp = await client.get(url).json<any>();
+    const resp = await client
+      .get(url, { context: { downloadLimit: MAX_INFO_RESPONSE_BYTES } })
+      .json<any>();
     const observedRelease =
       resp?.release === undefined || resp?.release === null
         ? undefined

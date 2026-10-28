@@ -199,9 +199,10 @@ export class ContinuousObservationScheduler {
   }
 
   /**
-   * Get the hard deadline for submission after catch-up retries.
+   * Get the deadline for catch-up retries. Observations still pending at
+   * this point are dropped and the report is submitted without them.
    */
-  getSubmissionDeadline(): number {
+  getObservationDeadline(): number {
     return this.windowEnd + this.config.submissionBufferMs;
   }
 
