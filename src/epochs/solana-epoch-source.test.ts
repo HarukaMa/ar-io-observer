@@ -57,13 +57,11 @@ function makeSource(opts: {
   currentEpochIndex: number;
   genesisTimestamp: number;
   epochDuration: number;
-  cacheTtlMs?: number;
 }): { src: SolanaEpochSource; fetchStub: sinon.SinonStub } {
   const src = new SolanaEpochSource({
     rpc: {} as any,
     garProgramAddress: 'AF8QAEaR4hzsqeUDwEdeTXMYtdyFegTENBdnJro6WVLR' as any,
     log: makeLog(),
-    cacheTtlMs: opts.cacheTtlMs,
   });
   const fetchStub = sinon.stub().resolves({
     currentEpochIndex: opts.currentEpochIndex,
@@ -116,13 +114,12 @@ describe('SolanaEpochSource', () => {
       expect(p.epochIndex).to.equal(0);
     });
 
-    it('caches params within cacheTtlMs (only one RPC for repeat calls)', async () => {
+    it('caches params until the epoch ends (only one RPC for repeat calls)', async () => {
       const futureGenesis = Math.floor(Date.now() / 1000) - 60;
       const { src, fetchStub } = makeSource({
         currentEpochIndex: 2, // active epoch 1 starts ~now, ends ~hour from now
         genesisTimestamp: futureGenesis - 3600, // epoch 0 = past, epoch 1 = active
         epochDuration: 3600,
-        cacheTtlMs: 10_000,
       });
       await src.getEpochParams();
       await src.getEpochParams();
@@ -135,22 +132,8 @@ describe('SolanaEpochSource', () => {
         currentEpochIndex: 1, // active = 0
         genesisTimestamp: Math.floor(Date.now() / 1000) - 10_000, // far past
         epochDuration: 1, // 1-second epochs → already ended
-        cacheTtlMs: 60_000, // long ttl, cache shouldn't apply
       });
       await src.getEpochParams();
-      await src.getEpochParams();
-      expect(fetchStub.callCount).to.equal(2);
-    });
-
-    it('refetches after cacheTtlMs expires', async () => {
-      const { src, fetchStub } = makeSource({
-        currentEpochIndex: 2,
-        genesisTimestamp: Math.floor(Date.now() / 1000) - 60,
-        epochDuration: 1_000_000_000, // very far future end
-        cacheTtlMs: 1,
-      });
-      await src.getEpochParams();
-      await new Promise((r) => setTimeout(r, 5));
       await src.getEpochParams();
       expect(fetchStub.callCount).to.equal(2);
     });

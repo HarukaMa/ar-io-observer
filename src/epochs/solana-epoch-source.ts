@@ -47,23 +47,18 @@ export interface SolanaEpochSourceConfig {
   /** `ario-gar` program address — used to derive the EpochSettings PDA. */
   garProgramAddress: Address;
   log: winston.Logger;
-  /** How long to cache epoch params before refetching. Defaults to 30s
-   *  which matches the continuous-observer cycle interval. */
-  cacheTtlMs?: number;
 }
 
 export class SolanaEpochSource implements EpochTimestampSource {
   private readonly rpc: Rpc<SolanaRpcApi>;
   private readonly garProgramAddress: Address;
   private readonly log: winston.Logger;
-  private readonly cacheTtlMs: number;
-  private cached?: { params: EpochTimestampParams; fetchedAt: number };
+  private cached?: EpochTimestampParams;
 
   constructor(cfg: SolanaEpochSourceConfig) {
     this.rpc = cfg.rpc;
     this.garProgramAddress = cfg.garProgramAddress;
     this.log = cfg.log.child({ class: this.constructor.name });
-    this.cacheTtlMs = cfg.cacheTtlMs ?? 30_000;
   }
 
   /**
@@ -100,10 +95,10 @@ export class SolanaEpochSource implements EpochTimestampSource {
   }
 
   /**
-   * Resolve the currently-active epoch's timing parameters. Caches for
-   * `cacheTtlMs` to avoid hammering the RPC on the observer's 30s cycle.
-   * Cache invalidates the moment we cross `epochEndTimestamp` so the
-   * observer never operates on a stale epoch view.
+   * Resolve the currently-active epoch's timing parameters. They are fixed
+   * for the whole epoch, so the cache holds until `epochEndTimestamp` and
+   * each observer reads EpochSettings about once per epoch. Past the end it
+   * refetches every call until the cranker creates the next epoch.
    *
    * The currently-active epoch index is `currentEpochIndex - 1`: the
    * on-chain `current_epoch_index` is the NEXT epoch to be created
@@ -112,13 +107,11 @@ export class SolanaEpochSource implements EpochTimestampSource {
    * `SolanaARIOReadable.resolveEpochIndex`.
    */
   async getEpochParams(): Promise<EpochTimestampParams> {
-    const now = Date.now();
     if (
       this.cached !== undefined &&
-      this.cached.params.epochEndTimestamp > now &&
-      now - this.cached.fetchedAt < this.cacheTtlMs
+      this.cached.epochEndTimestamp > Date.now()
     ) {
-      return this.cached.params;
+      return this.cached;
     }
 
     const s = await this.fetchSettings();
@@ -134,7 +127,7 @@ export class SolanaEpochSource implements EpochTimestampSource {
       epochIndex: activeEpochIndex,
     };
 
-    this.cached = { params, fetchedAt: now };
+    this.cached = params;
     this.log.verbose('Epoch params resolved', {
       epochIndex: params.epochIndex,
       epochStartTimestamp: params.epochStartTimestamp,
