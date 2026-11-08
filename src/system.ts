@@ -681,6 +681,7 @@ const arweaveReportSink = new ArweaveReportSink({
   arweave,
   uploadArweave: reportUploadArweave,
   walletJwk,
+  seedChunks: true,
 });
 
 // ============================================================
