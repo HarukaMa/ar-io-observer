@@ -16,6 +16,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 import Arweave from 'arweave';
+import type TransactionModule from 'arweave/node/lib/transaction.js';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 import * as winston from 'winston';
@@ -25,24 +27,163 @@ import { ObserverReport, ReportInfo, ReportSink } from '../types.js';
 
 const gzip = promisify(zlib.gzip);
 
+async function requestStatus(
+  url: string,
+  timeoutMs: number,
+  init: RequestInit = {},
+): Promise<number | undefined> {
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    await response.body?.cancel();
+    return response.status;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A node without storage modules keeps posted data only until it is passed
+ * on, so once the report is mined, re-post any chunk that a sample of the
+ * upload node's peers cannot serve. Nodes reject chunks whose proof does
+ * not match the mined data_root and answer 303 for chunks they already hold.
+ */
+export async function seedReportChunks({
+  uploadArweave,
+  transaction,
+  data,
+  log,
+  pollIntervalMs = 60_000,
+  deadlineMs = 2 * 60 * 60_000,
+  peerCount = 5,
+  requestTimeoutMs = 10_000,
+}: {
+  uploadArweave: Arweave;
+  transaction: TransactionModule.default;
+  data: Uint8Array;
+  log: winston.Logger;
+  pollIntervalMs?: number;
+  deadlineMs?: number;
+  peerCount?: number;
+  requestTimeoutMs?: number;
+}): Promise<void> {
+  const txId = transaction.id;
+  const deadline = Date.now() + deadlineMs;
+  let mined: { offset: unknown; size: unknown } | undefined;
+  for (;;) {
+    const response = await uploadArweave.api
+      .get<unknown>(`tx/${txId}/offset`)
+      .catch(() => undefined);
+    const body = response?.data;
+    if (
+      response?.status === 200 &&
+      typeof body === 'object' &&
+      body !== null &&
+      'offset' in body &&
+      'size' in body
+    ) {
+      mined = body;
+      break;
+    }
+    if (Date.now() + pollIntervalMs > deadline) {
+      log.warn('Report not mined before chunk seeding deadline', { txId });
+      return;
+    }
+    await delay(pollIntervalMs, undefined, { ref: false });
+  }
+  if (
+    typeof mined.offset !== 'string' ||
+    !/^\d+$/.test(mined.offset) ||
+    mined.size !== String(data.byteLength)
+  ) {
+    log.warn('Mined report geometry does not match uploaded data', {
+      txId,
+      offset: mined.offset,
+      size: mined.size,
+    });
+    return;
+  }
+  const txStart = BigInt(mined.offset) - BigInt(mined.size) + 1n;
+
+  const listed = await uploadArweave.api
+    .get<unknown>('peers')
+    .catch(() => undefined);
+  const candidates = Array.isArray(listed?.data)
+    ? listed.data.filter((peer): peer is string => typeof peer === 'string')
+    : [];
+  const peers: string[] = [];
+  for (const peer of candidates.slice(0, peerCount * 4)) {
+    if (peers.length >= peerCount) break;
+    if (
+      (await requestStatus(`http://${peer}/info`, requestTimeoutMs)) === 200
+    ) {
+      peers.push(peer);
+    }
+  }
+  if (peers.length === 0) {
+    log.warn('No responsive peers to check report chunks', { txId });
+    return;
+  }
+
+  await transaction.prepareChunks(data);
+  const chunks = transaction.chunks?.chunks ?? [];
+  let missing = 0;
+  let unseeded = 0;
+  for (let index = 0; index < chunks.length; index++) {
+    const end = txStart + BigInt(chunks[index].maxByteRange) - 1n;
+    const found = await Promise.all(
+      peers.map((peer) =>
+        requestStatus(`http://${peer}/chunk/${end}`, requestTimeoutMs),
+      ),
+    );
+    if (found.includes(200)) continue;
+    missing++;
+    const body = JSON.stringify(transaction.getChunk(index, data));
+    const posted = await Promise.all(
+      peers.map((peer) =>
+        requestStatus(`http://${peer}/chunk`, requestTimeoutMs, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+        }),
+      ),
+    );
+    if (!posted.some((status) => status === 200 || status === 303)) {
+      unseeded++;
+    }
+  }
+  const summary = { txId, chunks: chunks.length, missing, unseeded, peers };
+  if (unseeded > 0) {
+    log.warn('Report chunks could not be seeded', summary);
+  } else {
+    log.verbose('Report chunks checked', summary);
+  }
+}
+
 export class ArweaveReportSink implements ReportSink {
   // Dependencies
   private log: winston.Logger;
   private arweave: Arweave;
   private readonly walletJwk: any; // JWK wallet type
+  private readonly seedChunks: boolean;
 
   constructor({
     log,
     arweave,
     walletJwk,
+    seedChunks = false,
   }: {
     log: winston.Logger;
     arweave: Arweave;
     walletJwk: any;
+    seedChunks?: boolean;
   }) {
     this.log = log.child({ class: this.constructor.name });
     this.arweave = arweave;
     this.walletJwk = walletJwk;
+    this.seedChunks = seedChunks;
   }
 
   async saveReport(reportInfo: ReportInfo): Promise<ReportInfo> {
@@ -105,6 +246,20 @@ export class ArweaveReportSink implements ReportSink {
       }
 
       log.verbose('Report saved to Arweave', { txId: transaction.id });
+
+      if (this.seedChunks) {
+        seedReportChunks({
+          uploadArweave: this.uploadArweave,
+          transaction,
+          data: gzipReportBuffer,
+          log,
+        }).catch((error) =>
+          log.warn('Report chunk seeding failed', {
+            txId: transaction.id,
+            error: `${error}`,
+          }),
+        );
+      }
 
       return {
         ...reportInfo,
